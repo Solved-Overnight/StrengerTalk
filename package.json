@@ -19,7 +19,8 @@
     "util": "^0.12.5",
     "react-router-dom": "^6.16.0",
     "firebase": "^10.4.0",
-    "simple-peer": "^9.11.1"
+    "simple-peer": "^9.11.1",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.15",
@@ -35,6 +36,7 @@
     "tailwindcss": "^3.3.3",
     "typescript": "^5.0.2",
     "vite": "^4.4.5",
-    "@types/simple-peer": "^9.11.5"
+    "@types/simple-peer": "^9.11.5",
+    "@types/uuid": "^9.0.7"
   }
 }

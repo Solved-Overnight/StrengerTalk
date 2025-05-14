@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import SimplePeer from 'simple-peer';
-import { ref, onValue, set, remove, get, onDisconnect } from 'firebase/database';
+import { ref, onValue, set, remove, get, onDisconnect, push } from 'firebase/database';
 import { database } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { v4 as uuidv4 } from 'uuid';
 
 interface PeerSignal {
   type: string;
@@ -16,36 +17,48 @@ interface ChatUser {
   photoURL?: string;
 }
 
+interface Message {
+  id: string;
+  senderId: string;
+  text: string;
+  timestamp: number;
+}
+
 export function useVoiceChat(chatId: string, partnerId?: string) {
   const { user } = useAuth();
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [partnerUser, setPartnerUser] = useState<ChatUser | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [messages, setMessages] = useState<Message[]>([]);
   
   const peerRef = useRef<SimplePeer.Instance | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
-  // Get user media for local audio
   useEffect(() => {
     async function getMedia() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
           audio: true,
-          video: false 
+          video: true 
         });
+        
+        // Start with video disabled
+        stream.getVideoTracks().forEach(track => {
+          track.enabled = false;
+        });
+        
         setLocalStream(stream);
         localStreamRef.current = stream;
-        
-        // Initialize peer connection after getting media
         initializePeerConnection(stream);
       } catch (err) {
-        console.error('Failed to get user media', err);
-        setError('Could not access microphone. Please check permissions.');
+        console.error('Failed to get media devices', err);
+        setError('Could not access camera/microphone. Please check permissions.');
         setIsConnecting(false);
       }
     }
@@ -59,62 +72,77 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
     };
   }, []);
 
-  // Initialize peer connection
+  // Listen for messages
+  useEffect(() => {
+    if (!chatId) return;
+
+    const messagesRef = ref(database, `chats/${chatId}/messages`);
+    const unsubscribe = onValue(messagesRef, (snapshot) => {
+      const messagesData = snapshot.val();
+      if (messagesData) {
+        const messagesList = Object.values(messagesData) as Message[];
+        setMessages(messagesList.sort((a, b) => a.timestamp - b.timestamp));
+      }
+    });
+
+    return () => unsubscribe();
+  }, [chatId]);
+
   const initializePeerConnection = (stream: MediaStream) => {
     if (!user || !chatId) return;
 
     const chatRef = ref(database, `chats/${chatId}`);
     const mySignalRef = ref(database, `chats/${chatId}/signals/${user.uid}`);
     
-    // Create WebRTC peer connection
-    const initiator = !partnerId;
-    
     try {
       peerRef.current = new SimplePeer({
-        initiator,
+        initiator: !partnerId,
         stream,
         trickle: true,
         config: {
           iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
+            { 
+              urls: [
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun3.l.google.com:19302',
+                'stun:stun4.l.google.com:19302'
+              ]
+            }
           ]
         }
       });
-      
-      // Set up event handlers for peer connection
+
       peerRef.current.on('signal', (data: PeerSignal) => {
         set(mySignalRef, JSON.stringify(data));
       });
-      
+
       peerRef.current.on('connect', () => {
-        console.log('Peer connection established');
         setIsConnected(true);
         setIsConnecting(false);
+        setError(null);
       });
-      
-      peerRef.current.on('stream', (stream: MediaStream) => {
-        console.log('Received remote stream');
-        setRemoteStream(stream);
+
+      peerRef.current.on('stream', (remoteStream: MediaStream) => {
+        setRemoteStream(remoteStream);
       });
-      
+
       peerRef.current.on('error', (err: Error) => {
         console.error('Peer connection error:', err);
-        setError('Connection error: ' + err.message);
+        setError('Connection error. Please try again.');
         setIsConnecting(false);
       });
-      
+
       peerRef.current.on('close', () => {
-        console.log('Peer connection closed');
         setIsConnected(false);
+        setError('Connection closed');
       });
-      
+
       // Listen for partner signals
       if (partnerId) {
         listenToPartnerSignals(partnerId);
         fetchPartnerInfo(partnerId);
       } else {
-        // If initiator, wait for someone to join
         const usersRef = ref(database, `chats/${chatId}/users`);
         onValue(usersRef, (snapshot) => {
           const users = snapshot.val() || {};
@@ -126,20 +154,19 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
           }
         });
       }
-      
-      // Update chat status in Firebase
+
+      // Update presence
       set(ref(database, `chats/${chatId}/users/${user.uid}`), {
         connected: true,
-        timestamp: new Date().toISOString()
+        timestamp: Date.now()
       });
-      
-      // Set up cleanup on disconnect
+
       onDisconnect(ref(database, `chats/${chatId}/users/${user.uid}`))
-        .update({ connected: false, timestamp: new Date().toISOString() });
-        
+        .update({ connected: false, timestamp: Date.now() });
+
     } catch (err) {
-      console.error('Error initializing peer connection:', err);
-      setError('Failed to initialize connection');
+      console.error('Failed to initialize peer connection:', err);
+      setError('Failed to initialize connection. Please refresh and try again.');
       setIsConnecting(false);
     }
   };
@@ -158,7 +185,7 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
       }
     });
   }
-  
+
   async function fetchPartnerInfo(uid: string) {
     const userRef = ref(database, `users/${uid}`);
     const snapshot = await get(userRef);
@@ -166,89 +193,72 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
       setPartnerUser(snapshot.val() as ChatUser);
     }
   }
-  
-  // Audio level detection for visualization
-  useEffect(() => {
-    if (!localStream) return;
-    
-    const audioContext = new AudioContext();
-    const analyser = audioContext.createAnalyser();
-    const microphone = audioContext.createMediaStreamSource(localStream);
-    const javascriptNode = audioContext.createScriptProcessor(2048, 1, 1);
-    
-    analyser.smoothingTimeConstant = 0.8;
-    analyser.fftSize = 1024;
-    
-    microphone.connect(analyser);
-    analyser.connect(javascriptNode);
-    javascriptNode.connect(audioContext.destination);
-    
-    javascriptNode.onaudioprocess = () => {
-      const array = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(array);
-      let values = 0;
-      
-      const length = array.length;
-      for (let i = 0; i < length; i++) {
-        values += array[i];
+
+  const toggleVideo = () => {
+    if (localStream) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setIsVideoEnabled(!isVideoEnabled);
       }
-      
-      const average = values / length;
-      setAudioLevel(average);
-    };
-    
-    return () => {
-      javascriptNode.disconnect();
-      analyser.disconnect();
-      microphone.disconnect();
-      if (audioContext.state !== 'closed') {
-        audioContext.close();
-      }
-    };
-  }, [localStream]);
-  
-  // Mute/unmute functionality
-  useEffect(() => {
-    if (!localStream) return;
-    
-    localStream.getAudioTracks().forEach(track => {
-      track.enabled = !isMuted;
-    });
-  }, [isMuted, localStream]);
-  
-  const toggleMute = () => {
-    setIsMuted(prev => !prev);
+    }
   };
-  
+
+  const toggleMute = () => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = isMuted;
+      });
+      setIsMuted(!isMuted);
+    }
+  };
+
+  const sendMessage = async (text: string) => {
+    if (!user || !chatId || !text.trim()) return;
+
+    const messageRef = push(ref(database, `chats/${chatId}/messages`));
+    const message: Message = {
+      id: uuidv4(),
+      senderId: user.uid,
+      text: text.trim(),
+      timestamp: Date.now()
+    };
+
+    await set(messageRef, message);
+  };
+
   const endCall = () => {
     if (peerRef.current) {
       peerRef.current.destroy();
     }
-    
+
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
     }
-    
+
     if (user && chatId) {
-      const mySignalRef = ref(database, `chats/${chatId}/signals/${user.uid}`);
-      remove(mySignalRef);
+      remove(ref(database, `chats/${chatId}/signals/${user.uid}`));
       set(ref(database, `chats/${chatId}/users/${user.uid}`), {
         connected: false,
-        timestamp: new Date().toISOString()
+        timestamp: Date.now()
       });
     }
   };
-  
+
   return {
     localStream,
     remoteStream,
     isMuted,
+    isVideoEnabled,
     isConnecting,
     isConnected,
     error,
     partnerUser,
     audioLevel,
+    messages,
     toggleMute,
+    toggleVideo,
+    sendMessage,
     endCall
   };
 }

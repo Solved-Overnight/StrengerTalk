@@ -1,33 +1,40 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, User, ThumbsUp, ThumbsDown, Flag, Mic } from 'lucide-react';
+import { ArrowLeft, User, ThumbsUp, ThumbsDown, Flag, Mic, Video, VideoOff, Send } from 'lucide-react';
 import { useVoiceChat } from '../hooks/useVoiceChat';
 import VoiceControls from '../components/VoiceControls';
 import AudioVisualizer from '../components/AudioVisualizer';
-import LoadingScreen from '../components/LoadingScreen';
 
 const VoiceChat = () => {
   const { chatId } = useParams<{ chatId: string }>();
   const [searchParams] = useSearchParams();
   const partnerId = searchParams.get('partner') || undefined;
   const navigate = useNavigate();
+  const [message, setMessage] = useState('');
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   
   const {
     localStream,
     remoteStream,
     isMuted,
+    isVideoEnabled,
     isConnecting,
     isConnected,
     error,
     partnerUser,
     audioLevel,
+    messages,
     toggleMute,
+    toggleVideo,
+    sendMessage,
     endCall
   } = useVoiceChat(chatId || '', partnerId);
 
   const [callDuration, setCallDuration] = useState(0);
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportReason, setReportReason] = useState('');
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     let timer: number;
@@ -42,6 +49,24 @@ const VoiceChat = () => {
       if (timer) clearInterval(timer);
     };
   }, [isConnected]);
+
+  useEffect(() => {
+    if (localStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
+  useEffect(() => {
+    if (remoteStream && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -58,6 +83,14 @@ const VoiceChat = () => {
     console.log('Reporting user for:', reportReason);
     setShowReportModal(false);
     handleEndCall();
+  };
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (message.trim()) {
+      sendMessage(message);
+      setMessage('');
+    }
   };
 
   if (!chatId) {
@@ -92,7 +125,7 @@ const VoiceChat = () => {
             Connecting...
           </h2>
           <p className="text-gray-600 dark:text-gray-300">
-            Setting up your voice connection
+            Setting up your connection
           </p>
         </div>
         <button 
@@ -106,7 +139,7 @@ const VoiceChat = () => {
   }
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <button 
           onClick={handleEndCall}
@@ -129,67 +162,129 @@ const VoiceChat = () => {
         </button>
       </div>
 
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg overflow-hidden mb-8">
-        <div className="p-6">
-          <div className="flex items-center justify-center">
-            <div className="text-center">
-              {partnerUser ? (
-                <div className="mb-6">
-                  {partnerUser.photoURL ? (
-                    <img 
-                      src={partnerUser.photoURL} 
-                      alt={partnerUser.displayName} 
-                      className="w-24 h-24 rounded-full mx-auto border-4 border-primary-500 dark:border-primary-400" 
-                    />
-                  ) : (
-                    <div className="w-24 h-24 rounded-full mx-auto bg-gray-200 dark:bg-gray-700 flex items-center justify-center border-4 border-primary-500 dark:border-primary-400">
-                      <User className="w-12 h-12 text-gray-500 dark:text-gray-400" />
-                    </div>
-                  )}
-                  <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mt-4">
-                    {partnerUser.displayName}
-                  </h2>
-                </div>
-              ) : (
-                <div className="animate-pulse mb-6">
-                  <div className="w-24 h-24 rounded-full mx-auto bg-gray-200 dark:bg-gray-700 mb-4"></div>
-                  <div className="h-6 w-32 bg-gray-200 dark:bg-gray-700 rounded mx-auto"></div>
-                </div>
+      <div className="grid grid-cols-3 gap-6">
+        {/* Video and Controls */}
+        <div className="col-span-2">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg overflow-hidden mb-6">
+            <div className="relative aspect-video bg-gray-900">
+              {remoteStream && (
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
               )}
               
-              <div className="mt-8 mb-12">
-                <AudioVisualizer 
-                  audioLevel={audioLevel} 
-                  isSpeaking={isConnected && !isMuted} 
+              {/* Local video preview */}
+              <div className="absolute bottom-4 right-4 w-1/4 aspect-video bg-gray-800 rounded-lg overflow-hidden">
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
                 />
               </div>
             </div>
+
+            <div className="p-4">
+              <AudioVisualizer 
+                audioLevel={audioLevel} 
+                isSpeaking={isConnected && !isMuted} 
+              />
+            </div>
+
+            <div className="bg-gray-50 dark:bg-gray-900 p-4 flex justify-center space-x-4">
+              <VoiceControls 
+                isMuted={isMuted} 
+                toggleMute={toggleMute}
+                endCall={handleEndCall}
+              />
+              <button
+                onClick={toggleVideo}
+                className={`p-4 rounded-full ${
+                  isVideoEnabled
+                    ? 'bg-primary-500 text-white'
+                    : 'bg-gray-300 text-gray-700'
+                }`}
+              >
+                {isVideoEnabled ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex justify-center space-x-6">
+            <button className="flex flex-col items-center text-gray-600 hover:text-primary-600 dark:text-gray-300 dark:hover:text-primary-400">
+              <div className="bg-gray-100 dark:bg-gray-800 p-3 rounded-full mb-2">
+                <ThumbsUp className="w-5 h-5" />
+              </div>
+              <span className="text-sm">Like</span>
+            </button>
+            
+            <button className="flex flex-col items-center text-gray-600 hover:text-error-600 dark:text-gray-300 dark:hover:text-error-400">
+              <div className="bg-gray-100 dark:bg-gray-800 p-3 rounded-full mb-2">
+                <ThumbsDown className="w-5 h-5" />
+              </div>
+              <span className="text-sm">Dislike</span>
+            </button>
           </div>
         </div>
-        
-        <div className="bg-gray-50 dark:bg-gray-900 px-6 py-8 flex justify-center">
-          <VoiceControls 
-            isMuted={isMuted} 
-            toggleMute={toggleMute} 
-            endCall={handleEndCall} 
-          />
+
+        {/* Chat */}
+        <div className="col-span-1">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg h-[600px] flex flex-col">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                Chat
+              </h3>
+            </div>
+
+            <div 
+              ref={chatContainerRef}
+              className="flex-1 overflow-y-auto p-4 space-y-4"
+            >
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex ${msg.senderId === partnerUser?.uid ? 'justify-start' : 'justify-end'}`}
+                >
+                  <div
+                    className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                      msg.senderId === partnerUser?.uid
+                        ? 'bg-gray-100 dark:bg-gray-700'
+                        : 'bg-primary-500 text-white'
+                    }`}
+                  >
+                    <p className="text-sm">{msg.text}</p>
+                    <span className="text-xs opacity-70">
+                      {new Date(msg.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <form onSubmit={handleSendMessage} className="p-4 border-t border-gray-200 dark:border-gray-700">
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="Type a message..."
+                  className="input flex-1"
+                />
+                <button
+                  type="submit"
+                  disabled={!message.trim()}
+                  className="btn-primary p-2"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
-      </div>
-      
-      <div className="flex justify-center space-x-6">
-        <button className="flex flex-col items-center text-gray-600 hover:text-primary-600 dark:text-gray-300 dark:hover:text-primary-400">
-          <div className="bg-gray-100 dark:bg-gray-800 p-3 rounded-full mb-2">
-            <ThumbsUp className="w-5 h-5" />
-          </div>
-          <span className="text-sm">Like</span>
-        </button>
-        
-        <button className="flex flex-col items-center text-gray-600 hover:text-error-600 dark:text-gray-300 dark:hover:text-error-400">
-          <div className="bg-gray-100 dark:bg-gray-800 p-3 rounded-full mb-2">
-            <ThumbsDown className="w-5 h-5" />
-          </div>
-          <span className="text-sm">Dislike</span>
-        </button>
       </div>
       
       {showReportModal && (
