@@ -29,29 +29,143 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
   
   const peerRef = useRef<SimplePeer.Instance | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  
+
   // Get user media for local audio
   useEffect(() => {
     async function getMedia() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: true,
+          video: false 
+        });
         setLocalStream(stream);
         localStreamRef.current = stream;
+        
+        // Initialize peer connection after getting media
+        initializePeerConnection(stream);
       } catch (err) {
         console.error('Failed to get user media', err);
         setError('Could not access microphone. Please check permissions.');
+        setIsConnecting(false);
       }
     }
     
     getMedia();
     
     return () => {
-      // Clean up local stream when component unmounts
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
     };
   }, []);
+
+  // Initialize peer connection
+  const initializePeerConnection = (stream: MediaStream) => {
+    if (!user || !chatId) return;
+
+    const chatRef = ref(database, `chats/${chatId}`);
+    const mySignalRef = ref(database, `chats/${chatId}/signals/${user.uid}`);
+    
+    // Create WebRTC peer connection
+    const initiator = !partnerId;
+    
+    try {
+      peerRef.current = new SimplePeer({
+        initiator,
+        stream,
+        trickle: true,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+          ]
+        }
+      });
+      
+      // Set up event handlers for peer connection
+      peerRef.current.on('signal', (data: PeerSignal) => {
+        set(mySignalRef, JSON.stringify(data));
+      });
+      
+      peerRef.current.on('connect', () => {
+        console.log('Peer connection established');
+        setIsConnected(true);
+        setIsConnecting(false);
+      });
+      
+      peerRef.current.on('stream', (stream: MediaStream) => {
+        console.log('Received remote stream');
+        setRemoteStream(stream);
+      });
+      
+      peerRef.current.on('error', (err: Error) => {
+        console.error('Peer connection error:', err);
+        setError('Connection error: ' + err.message);
+        setIsConnecting(false);
+      });
+      
+      peerRef.current.on('close', () => {
+        console.log('Peer connection closed');
+        setIsConnected(false);
+      });
+      
+      // Listen for partner signals
+      if (partnerId) {
+        listenToPartnerSignals(partnerId);
+        fetchPartnerInfo(partnerId);
+      } else {
+        // If initiator, wait for someone to join
+        const usersRef = ref(database, `chats/${chatId}/users`);
+        onValue(usersRef, (snapshot) => {
+          const users = snapshot.val() || {};
+          const userIds = Object.keys(users).filter(id => id !== user.uid);
+          
+          if (userIds.length > 0) {
+            listenToPartnerSignals(userIds[0]);
+            fetchPartnerInfo(userIds[0]);
+          }
+        });
+      }
+      
+      // Update chat status in Firebase
+      set(ref(database, `chats/${chatId}/users/${user.uid}`), {
+        connected: true,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Set up cleanup on disconnect
+      onDisconnect(ref(database, `chats/${chatId}/users/${user.uid}`))
+        .update({ connected: false, timestamp: new Date().toISOString() });
+        
+    } catch (err) {
+      console.error('Error initializing peer connection:', err);
+      setError('Failed to initialize connection');
+      setIsConnecting(false);
+    }
+  };
+
+  function listenToPartnerSignals(uid: string) {
+    const partnerSignalRef = ref(database, `chats/${chatId}/signals/${uid}`);
+    onValue(partnerSignalRef, (snapshot) => {
+      const signalData = snapshot.val();
+      if (signalData && peerRef.current) {
+        try {
+          const signal = JSON.parse(signalData);
+          peerRef.current.signal(signal);
+        } catch (err) {
+          console.error('Error parsing signal data:', err);
+        }
+      }
+    });
+  }
+  
+  async function fetchPartnerInfo(uid: string) {
+    const userRef = ref(database, `users/${uid}`);
+    const snapshot = await get(userRef);
+    if (snapshot.exists()) {
+      setPartnerUser(snapshot.val() as ChatUser);
+    }
+  }
   
   // Audio level detection for visualization
   useEffect(() => {
@@ -92,120 +206,6 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
       }
     };
   }, [localStream]);
-
-  // Initialize signaling and WebRTC connection
-  useEffect(() => {
-    if (!user || !localStream || !chatId) return;
-    
-    const chatRef = ref(database, `chats/${chatId}`);
-    const mySignalRef = ref(database, `chats/${chatId}/signals/${user.uid}`);
-    
-    // Create WebRTC peer connection
-    const initiator = !partnerId;
-    
-    peerRef.current = new SimplePeer({
-      initiator,
-      stream: localStream,
-      trickle: true
-    });
-    
-    // Set up event handlers for peer connection
-    peerRef.current.on('signal', (data: PeerSignal) => {
-      // Send signal data to the other peer
-      set(mySignalRef, JSON.stringify(data));
-    });
-    
-    peerRef.current.on('connect', () => {
-      console.log('Peer connection established');
-      setIsConnected(true);
-      setIsConnecting(false);
-    });
-    
-    peerRef.current.on('stream', (stream: MediaStream) => {
-      console.log('Received remote stream');
-      setRemoteStream(stream);
-    });
-    
-    peerRef.current.on('error', (err: Error) => {
-      console.error('Peer connection error:', err);
-      setError('Connection error: ' + err.message);
-      setIsConnecting(false);
-    });
-    
-    peerRef.current.on('close', () => {
-      console.log('Peer connection closed');
-      setIsConnected(false);
-    });
-    
-    // Update chat status in Firebase
-    set(ref(database, `chats/${chatId}/users/${user.uid}`), {
-      connected: true,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Set up cleanup on disconnect
-    onDisconnect(ref(database, `chats/${chatId}/users/${user.uid}`))
-      .update({ connected: false, timestamp: new Date().toISOString() });
-    
-    // Listen for partner signals
-    let partnerUid = '';
-    
-    if (partnerId) {
-      partnerUid = partnerId;
-      listenToPartnerSignals(partnerId);
-      fetchPartnerInfo(partnerId);
-    } else {
-      // If initiator, wait for someone to join
-      const usersRef = ref(database, `chats/${chatId}/users`);
-      onValue(usersRef, (snapshot) => {
-        const users = snapshot.val() || {};
-        const userIds = Object.keys(users).filter(id => id !== user.uid);
-        
-        if (userIds.length > 0 && !partnerUid) {
-          partnerUid = userIds[0];
-          listenToPartnerSignals(partnerUid);
-          fetchPartnerInfo(partnerUid);
-        }
-      });
-    }
-    
-    function listenToPartnerSignals(uid: string) {
-      const partnerSignalRef = ref(database, `chats/${chatId}/signals/${uid}`);
-      onValue(partnerSignalRef, (snapshot) => {
-        const signalData = snapshot.val();
-        if (signalData && peerRef.current) {
-          try {
-            const signal = JSON.parse(signalData);
-            peerRef.current.signal(signal);
-          } catch (err) {
-            console.error('Error parsing signal data:', err);
-          }
-        }
-      });
-    }
-    
-    async function fetchPartnerInfo(uid: string) {
-      const userRef = ref(database, `users/${uid}`);
-      const snapshot = await get(userRef);
-      if (snapshot.exists()) {
-        setPartnerUser(snapshot.val() as ChatUser);
-      }
-    }
-    
-    // Clean up when component unmounts
-    return () => {
-      if (peerRef.current) {
-        peerRef.current.destroy();
-      }
-      
-      // Remove signals and mark user as disconnected
-      remove(mySignalRef);
-      set(ref(database, `chats/${chatId}/users/${user.uid}`), {
-        connected: false,
-        timestamp: new Date().toISOString()
-      });
-    };
-  }, [chatId, localStream, partnerId, user]);
   
   // Mute/unmute functionality
   useEffect(() => {
@@ -216,12 +216,10 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
     });
   }, [isMuted, localStream]);
   
-  // Function to toggle mute state
   const toggleMute = () => {
     setIsMuted(prev => !prev);
   };
   
-  // Function to end the call
   const endCall = () => {
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -231,7 +229,6 @@ export function useVoiceChat(chatId: string, partnerId?: string) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
     }
     
-    // Clean up in Firebase
     if (user && chatId) {
       const mySignalRef = ref(database, `chats/${chatId}/signals/${user.uid}`);
       remove(mySignalRef);

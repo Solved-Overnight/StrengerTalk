@@ -19,19 +19,16 @@ export function useActiveUsers() {
   useEffect(() => {
     if (!user) return;
 
-    const activeUsersRef = query(
-      ref(database, 'users'),
-      orderByChild('status'),
-      equalTo('online')
-    );
-
-    const unsubscribe = onValue(activeUsersRef, (snapshot) => {
+    // Listen to all users instead of filtering by status
+    const usersRef = ref(database, 'users');
+    
+    const unsubscribe = onValue(usersRef, (snapshot) => {
       const users: User[] = [];
       snapshot.forEach((childSnapshot) => {
         const userData = childSnapshot.val();
         
-        // Don't include current user
-        if (userData.uid !== user.uid) {
+        // Don't include current user and only include online users
+        if (userData.uid !== user.uid && userData.status === 'online') {
           users.push(userData);
         }
       });
